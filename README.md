@@ -12,6 +12,6 @@ import _ "github.com/cockroachdb/c-snappy"
 // #cgo CXXFLAGS: -std=c++11
 // #cgo CPPFLAGS: -I <relative-path>/c-snappy/internal
 // #cgo darwin LDFLAGS: -Wl,-undefined -Wl,dynamic_lookup
-// #cgo linux LDFLAGS: -Wl,-unresolved-symbols=ignore-all
+// #cgo !darwin LDFLAGS: -Wl,-unresolved-symbols=ignore-all
 import "C"
 ```
