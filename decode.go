@@ -8,7 +8,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"unsafe"
 )
+
+// #include <snappy-c.h>
+import "C"
 
 var (
 	// ErrCorrupt reports that the input is invalid.
@@ -41,91 +45,24 @@ func decodedLen(src []byte) (blockLen, headerLen int, err error) {
 // Otherwise, a newly allocated slice will be returned.
 // It is valid to pass a nil dst.
 func Decode(dst, src []byte) ([]byte, error) {
-	dLen, s, err := decodedLen(src)
+	dLen, _, err := decodedLen(src)
 	if err != nil {
 		return nil, err
 	}
 	if len(dst) < dLen {
 		dst = make([]byte, dLen)
 	}
-
-	var d, offset, length int
-	for s < len(src) {
-		switch src[s] & 0x03 {
-		case tagLiteral:
-			x := uint(src[s] >> 2)
-			switch {
-			case x < 60:
-				s += 1
-			case x == 60:
-				s += 2
-				if s > len(src) {
-					return nil, ErrCorrupt
-				}
-				x = uint(src[s-1])
-			case x == 61:
-				s += 3
-				if s > len(src) {
-					return nil, ErrCorrupt
-				}
-				x = uint(src[s-2]) | uint(src[s-1])<<8
-			case x == 62:
-				s += 4
-				if s > len(src) {
-					return nil, ErrCorrupt
-				}
-				x = uint(src[s-3]) | uint(src[s-2])<<8 | uint(src[s-1])<<16
-			case x == 63:
-				s += 5
-				if s > len(src) {
-					return nil, ErrCorrupt
-				}
-				x = uint(src[s-4]) | uint(src[s-3])<<8 | uint(src[s-2])<<16 | uint(src[s-1])<<24
-			}
-			length = int(x + 1)
-			if length <= 0 {
-				return nil, errors.New("snappy: unsupported literal length")
-			}
-			if length > len(dst)-d || length > len(src)-s {
-				return nil, ErrCorrupt
-			}
-			copy(dst[d:], src[s:s+length])
-			d += length
-			s += length
-			continue
-
-		case tagCopy1:
-			s += 2
-			if s > len(src) {
-				return nil, ErrCorrupt
-			}
-			length = 4 + int(src[s-2])>>2&0x7
-			offset = int(src[s-2])&0xe0<<3 | int(src[s-1])
-
-		case tagCopy2:
-			s += 3
-			if s > len(src) {
-				return nil, ErrCorrupt
-			}
-			length = 1 + int(src[s-3])>>2
-			offset = int(src[s-2]) | int(src[s-1])<<8
-
-		case tagCopy4:
-			return nil, errors.New("snappy: unsupported COPY_4 tag")
-		}
-
-		end := d + length
-		if offset > d || end > len(dst) {
-			return nil, ErrCorrupt
-		}
-		for ; d < end; d++ {
-			dst[d] = dst[d-offset]
-		}
+	if dLen == 0 {
+		return dst[:0], nil
 	}
-	if d != dLen {
+
+	tLen := C.size_t(dLen)
+	status := C.snappy_uncompress((*C.char)(unsafe.Pointer(&src[0])), C.size_t(len(src)),
+		(*C.char)(unsafe.Pointer(&dst[0])), &tLen)
+	if status != C.SNAPPY_OK {
 		return nil, ErrCorrupt
 	}
-	return dst[:d], nil
+	return dst[:tLen], nil
 }
 
 // NewReader returns a new Reader that decompresses from r, using the framing
@@ -280,13 +217,11 @@ func (r *Reader) Read(p []byte) (int, error) {
 			// Section 4.5. Reserved unskippable chunks (chunk types 0x02-0x7f).
 			r.err = ErrUnsupported
 			return 0, r.err
-
-		} else {
-			// Section 4.4 Padding (chunk type 0xfe).
-			// Section 4.6. Reserved skippable chunks (chunk types 0x80-0xfd).
-			if !r.readFull(r.buf[:chunkLen]) {
-				return 0, r.err
-			}
+		}
+		// Section 4.4 Padding (chunk type 0xfe).
+		// Section 4.6. Reserved skippable chunks (chunk types 0x80-0xfd).
+		if !r.readFull(r.buf[:chunkLen]) {
+			return 0, r.err
 		}
 	}
 }
